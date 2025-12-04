@@ -17,4 +17,6 @@ STATS_FILE = "yash_stats.json"
 FIRST_RUN_FLAG = "yash_first_run.flag"
 
 # promo suffix (stylish)
-PROMO_SUFFIX = "\n\n⚡ Ｐｏｗｅｒｅｄ Ｂｙ — @YashXNetwork 
+PROMO_SUFFIX = """
+⚡ Ｐｏｗｅｒｅｄ Ｂｙ — @YashXNetwork ⚡
+"""
