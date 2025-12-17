@@ -1,162 +1,179 @@
-import json, os, threading, uuid
+import json, os, threading, time
 from datetime import datetime
-from config import DATA_FILE, PENDING_FILE, STATS_FILE
 
 _lock = threading.Lock()
 
-def _read(fn, default):
-    if not os.path.exists(fn):
+def _read_json(path, default):
+    if not os.path.exists(path):
         return default
     try:
-        with open(fn, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return default
 
-def _write(fn, data):
+def _write_json(path, data):
     with _lock:
-        with open(fn, "w", encoding='utf-8') as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-# main data structure:
-# {
-#   "texts": [{"id":1,"text":"..."}],
-#   "buttons": {"1":[{"text":"A","url":"..."}], "2":[...]},
-#   "channels": ["channel1","-100xxxxx"],
-#   "schedules": [{"id":"uuid","hhmm":"22:00","text_id":2,"autodelete":3600,"last_run_date":null}],
-#   "autodeletes": {"1":3600, "2":0}
-# }
-def load_main_data():
-    return _read(DATA_FILE, {"texts":[],"buttons":{},"channels":[],"schedules":[],"autodeletes":{}})
+# ---- default structure ----
+DEFAULT = {
+    "texts": [],     # list of {"id":1,"text":"...","buttons_id":None}
+    "buttons": [],   # list of {"id":1,"name":"set1","rows":[ [ {"text":"A","url":"..."} ], [ ... ] ] }
+    "channels": [],  # list of channel identifiers like "@name" or "-100123..."
+    "schedules": [], # list of {"id":1,"text_id":X,"time":"HH:MM","auto_delete":0}
+    "pending": [],   # list of {"chat_id":str,"message_id":int,"send_time":"iso"}
+    "stats": {"broadcasts":0,"autoposts":0,"sent":0,"failed":0}
+}
 
-def save_main_data(data):
-    _write(DATA_FILE, data)
+def ensure_file(path):
+    if not os.path.exists(path):
+        _write_json(path, DEFAULT)
 
-# texts
-def save_promotion_text(tid, text, remove=False):
-    d = load_main_data()
-    if remove:
-        d["texts"] = [t for t in d["texts"] if t["id"] != tid]
-        # also remove buttons & autodelete mapping
-        d["buttons"].pop(str(tid), None)
-        d["autodeletes"].pop(str(tid), None)
-        save_main_data(d)
+# High level helpers (using path strings passed by caller)
+def load_main(path):
+    ensure_file(path)
+    return _read_json(path, DEFAULT.copy())
+
+def save_main(path, data):
+    _write_json(path, data)
+
+# Text helpers
+def add_text(path, text):
+    data = load_main(path)
+    nid = max([t["id"] for t in data["texts"]], default=0)+1
+    data["texts"].append({"id":nid,"text":text,"buttons_id":None})
+    save_main(path, data)
+    return nid
+
+def list_texts(path):
+    data = load_main(path)
+    return data["texts"]
+
+def get_text(path, tid):
+    data = load_main(path)
+    for t in data["texts"]:
+        if t["id"]==tid: return t
+    return None
+
+def remove_text(path, tid):
+    data = load_main(path)
+    data["texts"] = [t for t in data["texts"] if t["id"]!=tid]
+    save_main(path, data)
+    return True
+
+def clear_all_texts(path):
+    data = load_main(path)
+    data["texts"] = []
+    save_main(path, data)
+
+def set_text_buttons(path, tid, bid):
+    data = load_main(path)
+    for t in data["texts"]:
+        if t["id"]==tid:
+            t["buttons_id"] = bid
+    save_main(path, data)
+
+# Button helpers
+def add_button_set(path, name, rows):
+    data = load_main(path)
+    nid = max([b["id"] for b in data["buttons"]], default=0)+1
+    data["buttons"].append({"id":nid,"name":name,"rows":rows})
+    save_main(path, data)
+    return nid
+
+def list_button_sets(path):
+    data = load_main(path); return data["buttons"]
+
+def get_button_set(path, bid):
+    data = load_main(path)
+    for b in data["buttons"]:
+        if b["id"]==bid: return b
+    return None
+
+def remove_button_set(path, bid):
+    data = load_main(path)
+    data["buttons"] = [b for b in data["buttons"] if b["id"]!=bid]
+    # clear references
+    for t in data["texts"]:
+        if t.get("buttons_id")==bid: t["buttons_id"]=None
+    save_main(path, data)
+
+def clear_all_buttons(path):
+    data = load_main(path)
+    data["buttons"] = []
+    for t in data["texts"]:
+        t["buttons_id"]=None
+    save_main(path, data)
+
+# Channel helpers
+def add_channel(path, ch):
+    data = load_main(path)
+    if ch not in data["channels"]:
+        data["channels"].append(ch)
+        save_main(path, data)
         return True
-    if text is None:
-        return False
-    # upsert
-    exists = False
-    for t in d["texts"]:
-        if t["id"] == tid:
-            t["text"] = text; exists=True; break
-    if not exists:
-        d["texts"].append({"id": tid, "text": text})
-    save_main_data(d)
-    return True
-
-def get_promotion_texts():
-    d = load_main_data()
-    return d.get("texts", [])
-
-def clear_all_texts():
-    d = load_main_data()
-    d["texts"] = []
-    d["buttons"] = {}
-    d["autodeletes"] = {}
-    save_main_data(d)
-
-# buttons
-def save_buttons_for_text(tid, buttons, remove=False):
-    d = load_main_data()
-    key = str(tid)
-    if remove:
-        d["buttons"].pop(key, None); save_main_data(d); return True
-    d["buttons"][key] = buttons or []
-    save_main_data(d); return True
-
-def get_buttons_for_text(tid):
-    d = load_main_data()
-    return d.get("buttons", {}).get(str(tid), [])
-
-def clear_all_buttons():
-    d = load_main_data(); d["buttons"] = {}; save_main_data(d)
-
-# channels
-def save_channels(ch):
-    d = load_main_data()
-    chs = d.get("channels", [])
-    if ch not in chs:
-        chs.append(ch); d["channels"] = chs; save_main_data(d)
-
-def get_channels():
-    d = load_main_data()
-    return d.get("channels", [])
-
-def remove_channel(ch):
-    d = load_main_data()
-    if ch in d.get("channels", []):
-        d["channels"].remove(ch); save_main_data(d); return True
     return False
 
-# schedules (autopost exact time daily)
-def save_autopost_schedule(hhmm, text_id, autodelete=0, update=False, clear_all=False):
-    d = load_main_data()
-    if clear_all:
-        d["schedules"] = []; save_main_data(d); return True
-    if update and isinstance(hhmm, dict):
-        # update schedule dict provided
-        schedules = d.get("schedules", [])
-        for i, s in enumerate(schedules):
-            if s.get("id") == hhmm.get("id"):
-                schedules[i] = hhmm; d["schedules"] = schedules; save_main_data(d); return True
-    if hhmm is None:
-        return False
-    entry = {"id": str(uuid.uuid4()), "hhmm": hhmm, "text_id": int(text_id), "autodelete": int(autodelete), "last_run_date": None}
-    d.setdefault("schedules", []).append(entry)
-    save_main_data(d)
-    return True
-
-def get_autopost_schedules():
-    d = load_main_data()
-    return d.get("schedules", [])
-
-def remove_schedule(index):
-    d = load_main_data()
-    arr = d.get("schedules", [])
-    if 0 <= index-1 < len(arr):
-        arr.pop(index-1); d["schedules"] = arr; save_main_data(d); return True
+def remove_channel(path, ch):
+    data = load_main(path)
+    if ch in data["channels"]:
+        data["channels"].remove(ch)
+        save_main(path, data)
+        return True
     return False
 
-# per-text autodelete
-def save_autodelete_for_text(tid, seconds):
-    d = load_main_data()
-    d.setdefault("autodeletes", {})[str(tid)] = int(seconds)
-    save_main_data(d)
+def list_channels(path):
+    data = load_main(path)
+    return data["channels"]
 
-def get_autodelete_for_text(tid):
-    d = load_main_data()
-    return int(d.get("autodeletes", {}).get(str(tid), 0) or 0)
+def clear_all_channels(path):
+    data = load_main(path); data["channels"] = []; save_main(path,data)
 
-# pending deletes (list of {"chat_id","message_id","send_time","autodelete"})
-def add_pending(chat_id, message_id, send_time_iso, autodelete=0):
-    p = _read(PENDING_FILE, [])
-    p.append({"chat_id": str(chat_id), "message_id": int(message_id), "send_time": send_time_iso, "autodelete": int(autodelete)})
-    _write(PENDING_FILE, p)
+# Schedule helpers (time in "HH:MM")
+def add_schedule(path, text_id, hhmm, auto_delete=0):
+    data = load_main(path)
+    sid = max([s["id"] for s in data["schedules"]], default=0)+1
+    data["schedules"].append({"id":sid,"text_id":text_id,"time":hhmm,"auto_delete":auto_delete})
+    save_main(path, data)
+    return sid
 
-def get_pending():
-    return _read(PENDING_FILE, [])
+def list_schedules(path):
+    data = load_main(path); return data["schedules"]
 
-def replace_pending(new):
-    _write(PENDING_FILE, new)
+def remove_schedule(path, sid):
+    data = load_main(path)
+    data["schedules"] = [s for s in data["schedules"] if s["id"]!=sid]
+    save_main(path, data)
 
-# stats
-def add_stats(broadcast=0, autopost=0, sent=0, failed=0):
-    s = _read(STATS_FILE, {"broadcasts":0,"autoposts":0,"sent":0,"failed":0})
-    s["broadcasts"] = s.get("broadcasts",0) + int(broadcast)
-    s["autoposts"] = s.get("autoposts",0) + int(autopost)
-    s["sent"] = s.get("sent",0) + int(sent)
-    s["failed"] = s.get("failed",0) + int(failed)
-    _write(STATS_FILE, s)
+def clear_all_schedules(path):
+    data = load_main(path); data["schedules"]=[]; save_main(path,data)
 
-def get_stats():
-    return _read(STATS_FILE, {"broadcasts":0,"autoposts":0,"sent":0,"failed":0})
+# Pending delete / stats
+def add_pending(path, chat_id, msg_id, send_time_iso):
+    data = load_main(path)
+    data["pending"].append({"chat_id":str(chat_id),"message_id":int(msg_id),"send_time":send_time_iso})
+    save_main(path, data)
+
+def get_pending(path):
+    data = load_main(path)
+    return data.get("pending",[])
+
+def replace_pending(path, newlist):
+    data = load_main(path)
+    data["pending"] = newlist
+    save_main(path, data)
+
+def add_stats(path, sent=0, failed=0, broadcast=0, autopost=0):
+    data = load_main(path)
+    st = data.get("stats",{"broadcasts":0,"autoposts":0,"sent":0,"failed":0})
+    st["sent"] = st.get("sent",0) + sent
+    st["failed"] = st.get("failed",0) + failed
+    st["broadcasts"] = st.get("broadcasts",0) + broadcast
+    st["autoposts"] = st.get("autoposts",0) + autopost
+    data["stats"] = st
+    save_main(path, data)
+
+def get_stats(path):
+    return load_main(path).get("stats",{"broadcasts":0,"autoposts":0,"sent":0,"failed":0})
